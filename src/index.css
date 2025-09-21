@@ -1,0 +1,13 @@
+/* postcss */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Put global applies inside the base layer */
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-800;
+    font-family: system-ui, sans-serif;
+  }
+}

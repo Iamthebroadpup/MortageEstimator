@@ -1,0 +1,14 @@
+@"
+# editors & IDEs
+.cursor/
+.vscode/
+.idea/
+# deps & builds
+node_modules/
+dist/
+build/
+# env & OS
+.env
+.env.*
+.DS_Store
+"@ | Set-Content .gitignore

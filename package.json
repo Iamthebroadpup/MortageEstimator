@@ -1,0 +1,24 @@
+{
+    "name": "mortgage-scenario-pro",
+    "version": "1.0.0",
+    "private": true,
+    "scripts": {
+      "dev": "vite",
+      "build": "vite build",
+      "preview": "vite preview"
+    },
+    "dependencies": {
+      "lucide-react": "^0.344.0",
+      "react": "^18.3.1",
+      "react-dom": "^18.3.1",
+      "recharts": "^2.12.7"
+    },
+    "devDependencies": {
+      "@vitejs/plugin-react": "^4.2.0",
+      "autoprefixer": "^10.4.15",
+      "postcss": "^8.4.29",
+      "tailwindcss": "^3.3.3",
+      "vite": "^5.0.0"
+    }
+  }
+  
