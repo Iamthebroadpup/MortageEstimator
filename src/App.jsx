@@ -53,7 +53,7 @@ function buildSchedule({
   bankRate, // % for fixed or initial for arm/io
   bankTermYears,
   arm: { margin = 2.0, caps = { first: 2, periodic: 2, lifetime: 5 }, indexForecast = [] } = {},
-  ioMonths = 0, // interest-only months for IO loans
+  ioMonths = 0,
   pointsPct = 0,
   closingCosts = 0,
   family: { amount: famAmt = 0, rate: famRate = 4.5, termYears: famYears = 30, mode = "amortized" } = {},
@@ -63,11 +63,6 @@ function buildSchedule({
   escrow = true,
   pmi: { enabled: pmiEnabled = true, dropLTV = 0.78, pmiPctAnnual = 0.6 } = {},
   prepay: { monthlyExtra = 0, lumpSums = [] } = {},
-  investTracks = [
-    { key: "spx_est", label: "S&P Estimate", annualPct: 6.5 },
-    { key: "spx_hist", label: "S&P Historical", annualPct: 10.0 },
-    { key: "cd6", label: "CD/T-bill", annualPct: 5.5 },
-  ],
   horizonYears = 30,
   discountRatePct = 5.0,
   rentVsBuy: { monthlyRent = 0, rentInflationPct = 3 } = {},
@@ -77,47 +72,39 @@ function buildSchedule({
   const principalBankFull = price - down;
   const principalBank = Math.max(principalBankFull - famAmt, 0);
 
-  // Points cost (paid up front)
   const pointsCost = principalBank * (pointsPct / 100);
   const cashToClose = down + closingCosts + pointsCost;
 
-  // PMI logic
   const initLTV = principalBank / price;
   const pmiMonthlyBase = pmiEnabled && initLTV > 0.8 ? (principalBank * (pmiPctAnnual / 100)) / 12 : 0;
 
-  // Property tax & insurance with drift
   const taxMonthly0 = (taxPct / 100) * price / 12;
   const insMonthly0 = insuranceAnnual / 12;
 
-  // Family loan
   const famTermMonths = famYears * 12;
   const famMonthly = famAmt > 0
     ? (mode === "interest_only" ? (famAmt * toMonthlyRate(famRate)) : pmt(famAmt, famRate, famTermMonths))
     : 0;
 
-  // Bank loan model
   const bankMonthlyFixed = bankType === "fixed" ? pmt(principalBank, bankRate, termMonths) : 0;
 
   const rows = [];
   let bal = principalBank;
   let famBal = famAmt;
   let cumInterestBank = 0, cumInterestFam = 0;
-  let equity = down; // starter equity
-  let currentRate = bankRate; // for ARM
+  let equity = down;
+  let currentRate = bankRate;
   let pmiActive = pmiMonthlyBase > 0;
 
-  // Build index path for ARM resets (yearly)
   const indexPath = new Array(bankTermYears).fill(0).map((_, i) => indexForecast[i] ?? indexForecast[indexForecast.length - 1] ?? 0);
   const armCeiling = bankRate + caps.lifetime;
 
   for (let m = 1; m <= Math.min(horizonMonths, 720); m++) {
     const year = Math.ceil(m / 12);
 
-    // Update tax/insurance drift annually
     const taxMonthly = taxMonthly0 * Math.pow(1 + taxInflationPct / 100, year - 1);
     const insMonthly  = insMonthly0 * Math.pow(1 + insuranceInflationPct / 100, year - 1);
 
-    // Bank payment
     let bankPayment = 0, bankInterest = 0, bankPrincipalPaid = 0;
     if (principalBank > 0 && bal > 0 && m <= termMonths) {
       if (bankType === "fixed") {
@@ -147,7 +134,6 @@ function buildSchedule({
       }
       bankPrincipalPaid = Math.max(bankPayment - bankInterest, 0);
 
-      // Prepayments
       let prepayThisMonth = monthlyExtra;
       const lumps = lumpSums.filter(ls => ls.month === m).reduce((s, ls) => s + ls.amount, 0);
       prepayThisMonth += lumps;
@@ -157,14 +143,12 @@ function buildSchedule({
       cumInterestBank += bankInterest;
     }
 
-    // PMI drop check
     if (pmiActive) {
       const ltv = bal / price;
       if (ltv <= dropLTV || bal <= 0) pmiActive = false;
     }
     const pmiMonthly = pmiActive ? pmiMonthlyBase : 0;
 
-    // Family loan accrual
     let famPayment = 0, famInterest = 0, famPrincipalPaid = 0;
     if (famBal > 0) {
       if (mode === "interest_only") {
@@ -184,7 +168,7 @@ function buildSchedule({
 
     const totalMonthlyOut = (bankPayment || 0) + famPayment + (pmiMonthly || 0) + escrowItems + carryingCosts;
 
-    equity = price - bal - famBal; // approximate equity ignoring selling costs
+    equity = price - bal - famBal;
 
     rows.push({
       m,
@@ -210,7 +194,7 @@ function buildSchedule({
     });
   }
 
-  // Investment track fed with savings vs full-bank-only reference
+  // Investment stream (vs full-bank-only baseline)
   const bankFullMonthly = pmt(principalBankFull, bankRate, termMonths);
   const actualDebtMonthly = rows.map(r => (r.bankPayment || 0) + r.famPayment);
   const refDebtMonthly = new Array(rows.length).fill(bankFullMonthly);
@@ -242,16 +226,15 @@ function buildSchedule({
   const irrAnnual = (1 + irrMonthly) ** 12 - 1;
   const npvVal = npv(discountRatePct, cashflows);
 
-  // ---- FIX: compute rent path iteratively (avoid TDZ/self-reference)
+  // Rent path (iterative to avoid TDZ)
   const rentPath = [];
   const rentGrowth = 1 + rentInflationPct / 100 / 12;
   for (let i = 0; i < rows.length; i++) {
     rentPath[i] = (i === 0) ? monthlyRent : rentPath[i - 1] * rentGrowth;
   }
-
   const principalOut = rows.map(r => r.bankPrincipal + r.famPrincipal);
   const ownerLikeRent = rows.map((r, i) => r.totalMonthly - principalOut[i]);
-  const rentVsBuyDelta = ownerLikeRent.map((v, i) => v - rentPath[i]); // positive => owning costs more
+  const rentVsBuyDelta = ownerLikeRent.map((v, i) => v - rentPath[i]);
 
   return {
     rows,
@@ -280,11 +263,6 @@ const preset = {
   escrow: true,
   pmi: { enabled: true, dropLTV: 0.78, pmiPctAnnual: 0.6 },
   prepay: { monthlyExtra: 0, lumpSums: [] },
-  investTracks: [
-    { key: "spx_est", label: "S&P Estimate", annualPct: 6.5 },
-    { key: "spx_hist", label: "S&P Historical", annualPct: 10.0 },
-    { key: "cd6", label: "CD/T-bill", annualPct: 5.5 },
-  ],
   horizonYears: 30,
   discountRatePct: 5.0,
   rentVsBuy: { monthlyRent: 3500, rentInflationPct: 3 },
@@ -326,11 +304,16 @@ function Toggle({ label, checked, onChange }) {
   );
 }
 
+// UPDATED: number will wrap and scale down on small screens
 function KPI({ icon: Icon, label, value, hint }) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex items-center gap-2 text-slate-500 text-xs"><Icon size={16} /> {label}</div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
+      <div className="flex items-center gap-2 text-slate-500 text-xs">
+        <Icon size={16} /> {label}
+      </div>
+      <div className="mt-1 font-semibold tabular-nums leading-tight break-all text-xl sm:text-2xl">
+        {value}
+      </div>
       {hint && <div className="mt-1 text-xs text-slate-500">{hint}</div>}
     </div>
   );
@@ -341,17 +324,14 @@ export default function MortgageScenarioPro() {
   const [activeId, setActiveId] = useState(1);
 
   const active = scenarios.find(s => s.id === activeId) ?? scenarios[0];
-
   const result = useMemo(() => buildSchedule(active.cfg), [active]);
 
-  // Derived KPIs
   const monthlyNow = result.rows[0]?.totalMonthly ?? 0;
   const monthlyYear5 = result.rows[59]?.totalMonthly ?? monthlyNow;
   const cumBankInt = result.rows.reduce((a, r) => a + r.bankInterest, 0);
   const cumFamInt = result.rows.reduce((a, r) => a + r.famInterest, 0);
   const equity10 = result.rows[119]?.equity ?? 0;
 
-  // Chart data
   const monthlyMix = [
     { name: "Now", Bank: result.rows[0]?.bankPayment ?? 0, Family: result.rows[0]?.famPayment ?? 0, PMI: result.rows[0]?.pmi ?? 0, Escrow: result.rows[0]?.escrow ?? 0, Carry: (result.rows[0]?.hoa ?? 0) + (result.rows[0]?.maint ?? 0) + (result.rows[0]?.util ?? 0) },
     { name: "Year 5", Bank: result.rows[59]?.bankPayment ?? 0, Family: result.rows[59]?.famPayment ?? 0, PMI: result.rows[59]?.pmi ?? 0, Escrow: result.rows[59]?.escrow ?? 0, Carry: (result.rows[59]?.hoa ?? 0) + (result.rows[59]?.maint ?? 0) + (result.rows[59]?.util ?? 0) },
@@ -440,7 +420,6 @@ export default function MortgageScenarioPro() {
         {/* Layout: left inputs, right charts */}
         <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
           <section className="lg:col-span-1 space-y-5">
-            {/* Home & Costs */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Settings size={16}/> Home & Costs</div>
               <div className="grid grid-cols-2 gap-3">
@@ -459,7 +438,6 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
-            {/* Bank Loan */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> Bank Loan</div>
               <div className="grid grid-cols-2 gap-3">
@@ -487,9 +465,8 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
-            {/* Family Loan */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-3 flex items-centered gap-2 text-sm font-medium"><Info size={16}/> Family Loan</div>
+              <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> Family Loan</div>
               <div className="grid grid-cols-2 gap-3">
                 <NumberInput label="Amount" value={cfg.family.amount} onChange={(v)=>updateActive({family:{...cfg.family, amount:v}})} step={1000}/>
                 <label className="flex flex-col gap-1 text-sm">
@@ -504,7 +481,6 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
-            {/* PMI & Prepay */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> PMI & Prepay</div>
               <div className="grid grid-cols-2 gap-3">
@@ -516,7 +492,6 @@ export default function MortgageScenarioPro() {
               <div className="mt-2 text-xs text-slate-500">Add lump-sum prepayments by editing code or wire up a small sub-form if needed.</div>
             </div>
 
-            {/* Investing & Rent vs Buy */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> Investing & Rent vs Buy</div>
               <div className="grid grid-cols-2 gap-3">
@@ -525,17 +500,19 @@ export default function MortgageScenarioPro() {
                 <NumberInput label="Rent (mo)" value={cfg.rentVsBuy.monthlyRent} onChange={(v)=>updateActive({rentVsBuy:{...cfg.rentVsBuy, monthlyRent:v}})} step={50}/>
                 <NumberInput label="Rent drift (%)" value={cfg.rentVsBuy.rentInflationPct} onChange={(v)=>updateActive({rentVsBuy:{...cfg.rentVsBuy, rentInflationPct:v}})} step={0.25}/>
               </div>
-              <div className="mt-3 grid grid-cols-3 gap-3">
+              {/* UPDATED: responsive KPI grid */}
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 {result.investResults.map(ir => (
                   <KPI key={ir.key} icon={TrendingUp} label={ir.label} value={`$${ir.final.toLocaleString()}`} hint={`Profit $${ir.profit.toLocaleString()}`}/>
                 ))}
               </div>
-              <div className="mt-3 text-xs text-slate-500">Savings stream = (full-bank-only payment) − (actual bank+family payment). Compounded monthly.</div>
+              <div className="mt-3 text-xs text-slate-500">
+                Savings stream = (full-bank-only payment) − (actual bank+family payment). Compounded monthly.
+              </div>
             </div>
           </section>
 
           <section className="lg:col-span-2 space-y-6">
-            {/* Monthly Payment Mix */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-2 text-sm font-medium">Monthly Payment Mix (Now / 5y / 10y)</div>
               <div className="h-64 w-full">
@@ -556,7 +533,6 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
-            {/* Two small charts */}
             <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
               <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="mb-2 text-sm font-medium">Cumulative Interest (Bank vs Family)</div>
@@ -592,7 +568,6 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
-            {/* Rent vs Buy */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-1 flex items-center justify-between">
                 <div className="text-sm font-medium">Rent vs Buy — Monthly Delta</div>
@@ -612,7 +587,6 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
-            {/* NPV / IRR */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-2 text-sm font-medium">NPV / IRR (Owner cashflows incl. equity terminal value)</div>
               <div className="grid grid-cols-2 gap-4">
