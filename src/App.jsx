@@ -1,27 +1,14 @@
 import React, { useMemo, useState } from "react";
 import { Download, Plus, Trash2, TrendingUp, Wallet, Settings, Info } from "lucide-react";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend as RLegend,
-  LineChart, Line, ResponsiveContainer, ReferenceLine, Area, AreaChart
+  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  Tooltip as RTooltip, Legend as RLegend,
+  LineChart, Line, ResponsiveContainer, ReferenceLine,
+  Area, AreaChart
 } from "recharts";
 
 /**
  * Mortgage Scenario Pro — compact single-file build
- * -------------------------------------------------
- * What’s inside (high level):
- * - Multi-scenario inputs with presets and quick add
- * - Full monthly cashflow (mortgage/family loan, PMI, tax, insurance, HOA, maintenance, utilities, escrow)
- * - Loan types: Fixed, ARM (simplified), Interest-only period, Family loan (amortized or interest-only)
- * - Prepayments: monthly extra + one-off lumps
- * - Taxes/Insurance drift (annual %)
- * - Investment tracks: S&P (est), S&P (historical), CD/T-bill custom
- * - KPI header, Stacked bar (monthly mix), Lines for cumulative interest & equity
- * - NPV/IRR and Rent-vs-Buy companion
- * - CSV export of amortization schedule
- *
- * Notes:
- * - This is a compact engine; some finance details are simplified to keep it readable.
- * - ARM model uses yearly resets with (index + margin) bounded by caps; provide index forecast as a % array.
  */
 
 // ---------- Utility math helpers ----------
@@ -94,24 +81,23 @@ function buildSchedule({
   const pointsCost = principalBank * (pointsPct / 100);
   const cashToClose = down + closingCosts + pointsCost;
 
-  // --- PMI logic ---
+  // PMI logic
   const initLTV = principalBank / price;
   const pmiMonthlyBase = pmiEnabled && initLTV > 0.8 ? (principalBank * (pmiPctAnnual / 100)) / 12 : 0;
 
-  // --- Property tax & insurance with drift ---
+  // Property tax & insurance with drift
   const taxMonthly0 = (taxPct / 100) * price / 12;
   const insMonthly0 = insuranceAnnual / 12;
 
-  // --- Family loan ---
+  // Family loan
   const famTermMonths = famYears * 12;
   const famMonthly = famAmt > 0
     ? (mode === "interest_only" ? (famAmt * toMonthlyRate(famRate)) : pmt(famAmt, famRate, famTermMonths))
     : 0;
 
-  // --- Bank loan model ---
-  let bankMonthlyFixed = bankType === "fixed" ? pmt(principalBank, bankRate, termMonths) : 0;
+  // Bank loan model
+  const bankMonthlyFixed = bankType === "fixed" ? pmt(principalBank, bankRate, termMonths) : 0;
 
-  // Schedules
   const rows = [];
   let bal = principalBank;
   let famBal = famAmt;
@@ -124,10 +110,10 @@ function buildSchedule({
   const indexPath = new Array(bankTermYears).fill(0).map((_, i) => indexForecast[i] ?? indexForecast[indexForecast.length - 1] ?? 0);
   const armCeiling = bankRate + caps.lifetime;
 
-  for (let m = 1; m <= Math.min(horizonMonths, 720); m++) { // cap 60 years for safety
+  for (let m = 1; m <= Math.min(horizonMonths, 720); m++) {
     const year = Math.ceil(m / 12);
 
-    // Update tax/insurance drift annually at month 1 of each year
+    // Update tax/insurance drift annually
     const taxMonthly = taxMonthly0 * Math.pow(1 + taxInflationPct / 100, year - 1);
     const insMonthly  = insMonthly0 * Math.pow(1 + insuranceInflationPct / 100, year - 1);
 
@@ -137,30 +123,25 @@ function buildSchedule({
       if (bankType === "fixed") {
         bankPayment = bankMonthlyFixed;
       } else if (bankType === "io" && m <= ioMonths) {
-        // interest only period
         bankInterest = bal * toMonthlyRate(bankRate);
-        bankPayment = bankInterest; // principalPaid = 0 here, handled below
+        bankPayment = bankInterest;
       } else if (bankType === "arm") {
-        // Reset annually at month 13,25,... based on index + margin within caps
-        if (m === 1) currentRate = bankRate; // initial
+        if (m === 1) currentRate = bankRate;
         if (m > 1 && (m - 1) % 12 === 0) {
-          const resetIdx = Math.floor((m - 1) / 12); // 1-based year index
+          const resetIdx = Math.floor((m - 1) / 12);
           const desired = (indexPath[resetIdx] ?? 0) + margin;
           const lastRate = currentRate;
           const upCap = resetIdx === 1 ? caps.first : caps.periodic;
           currentRate = clamp(desired, lastRate - upCap, lastRate + upCap);
           currentRate = Math.min(currentRate, armCeiling);
         }
-        // Recompute payment on remaining term at currentRate
         const remaining = termMonths - (m - 1);
         bankPayment = pmt(bal, currentRate, Math.max(remaining, 1));
       } else if (bankType === "io") {
-        // after IO period, amortize over remaining term
         const remaining = termMonths - (m - ioMonths);
         bankPayment = pmt(bal, bankRate, Math.max(remaining, 1));
       }
 
-      // Interest/principal split (except IO branch where interest already set)
       if (!(bankType === "io" && m <= ioMonths)) {
         bankInterest = bal * toMonthlyRate(bankType === "arm" ? currentRate : bankRate);
       }
@@ -168,7 +149,6 @@ function buildSchedule({
 
       // Prepayments
       let prepayThisMonth = monthlyExtra;
-      // lump sums occurring this month
       const lumps = lumpSums.filter(ls => ls.month === m).reduce((s, ls) => s + ls.amount, 0);
       prepayThisMonth += lumps;
 
@@ -177,7 +157,7 @@ function buildSchedule({
       cumInterestBank += bankInterest;
     }
 
-    // PMI drop check on LTV if active
+    // PMI drop check
     if (pmiActive) {
       const ltv = bal / price;
       if (ltv <= dropLTV || bal <= 0) pmiActive = false;
@@ -189,7 +169,7 @@ function buildSchedule({
     if (famBal > 0) {
       if (mode === "interest_only") {
         famInterest = famBal * toMonthlyRate(famRate);
-        famPayment = famInterest; // no principal unless user models lumps separately
+        famPayment = famInterest;
       } else {
         famPayment = famMonthly;
         famInterest = famBal * toMonthlyRate(famRate);
@@ -230,13 +210,17 @@ function buildSchedule({
     });
   }
 
-  // Investment tracks fed with the payment delta vs. a reference (full bank loan w/o family)
+  // Investment track fed with savings vs full-bank-only reference
   const bankFullMonthly = pmt(principalBankFull, bankRate, termMonths);
   const actualDebtMonthly = rows.map(r => (r.bankPayment || 0) + r.famPayment);
   const refDebtMonthly = new Array(rows.length).fill(bankFullMonthly);
   const monthlySavings = refDebtMonthly.map((v, i) => Math.max(v - actualDebtMonthly[i], 0));
 
-  const investResults = investTracks.map(track => {
+  const investResults = [
+    { key: "spx_est", label: "S&P Estimate", annualPct: 6.5 },
+    { key: "spx_hist", label: "S&P Historical", annualPct: 10.0 },
+    { key: "cd6", label: "CD/T-bill", annualPct: 5.5 },
+  ].map(track => {
     let bal = 0;
     const r = toMonthlyRate(track.annualPct);
     for (let i = 0; i < monthlySavings.length; i++) {
@@ -247,13 +231,10 @@ function buildSchedule({
     return { key: track.key, label: track.label, final: +bal.toFixed(2), profit: +profit.toFixed(2) };
   });
 
-  // NPV/IRR (owner cash outflows are negative; equity at horizon as positive terminal value)
+  // NPV/IRR
   const cashflows = [];
-  // t=0 cash to close
   cashflows.push(-cashToClose);
-  // monthly
   rows.forEach(r => cashflows.push(-r.totalMonthly));
-  // terminal value (equity) at horizon
   const terminalEquity = rows[rows.length - 1]?.equity ?? 0;
   cashflows[cashflows.length - 1] += terminalEquity;
 
@@ -261,11 +242,16 @@ function buildSchedule({
   const irrAnnual = (1 + irrMonthly) ** 12 - 1;
   const npvVal = npv(discountRatePct, cashflows);
 
-  // Rent-vs-buy: compares monthly rent path with carrying costs excluding principal (since principal builds equity)
-  const rentPath = rows.map((_, i) => (i === 0 ? monthlyRent : rentPath[i - 1] * (1 + rentInflationPct / 100 / 12)));
+  // ---- FIX: compute rent path iteratively (avoid TDZ/self-reference)
+  const rentPath = [];
+  const rentGrowth = 1 + rentInflationPct / 100 / 12;
+  for (let i = 0; i < rows.length; i++) {
+    rentPath[i] = (i === 0) ? monthlyRent : rentPath[i - 1] * rentGrowth;
+  }
+
   const principalOut = rows.map(r => r.bankPrincipal + r.famPrincipal);
   const ownerLikeRent = rows.map((r, i) => r.totalMonthly - principalOut[i]);
-  const rentVsBuyDelta = ownerLikeRent.map((v, i) => v - rentPath[i]); // positive => owning costs more this month
+  const rentVsBuyDelta = ownerLikeRent.map((v, i) => v - rentPath[i]); // positive => owning costs more
 
   return {
     rows,
@@ -454,6 +440,7 @@ export default function MortgageScenarioPro() {
         {/* Layout: left inputs, right charts */}
         <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
           <section className="lg:col-span-1 space-y-5">
+            {/* Home & Costs */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Settings size={16}/> Home & Costs</div>
               <div className="grid grid-cols-2 gap-3">
@@ -472,6 +459,7 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
+            {/* Bank Loan */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> Bank Loan</div>
               <div className="grid grid-cols-2 gap-3">
@@ -499,8 +487,9 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
+            {/* Family Loan */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> Family Loan</div>
+              <div className="mb-3 flex items-centered gap-2 text-sm font-medium"><Info size={16}/> Family Loan</div>
               <div className="grid grid-cols-2 gap-3">
                 <NumberInput label="Amount" value={cfg.family.amount} onChange={(v)=>updateActive({family:{...cfg.family, amount:v}})} step={1000}/>
                 <label className="flex flex-col gap-1 text-sm">
@@ -515,6 +504,7 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
+            {/* PMI & Prepay */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> PMI & Prepay</div>
               <div className="grid grid-cols-2 gap-3">
@@ -526,6 +516,7 @@ export default function MortgageScenarioPro() {
               <div className="mt-2 text-xs text-slate-500">Add lump-sum prepayments by editing code or wire up a small sub-form if needed.</div>
             </div>
 
+            {/* Investing & Rent vs Buy */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> Investing & Rent vs Buy</div>
               <div className="grid grid-cols-2 gap-3">
@@ -544,6 +535,7 @@ export default function MortgageScenarioPro() {
           </section>
 
           <section className="lg:col-span-2 space-y-6">
+            {/* Monthly Payment Mix */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-2 text-sm font-medium">Monthly Payment Mix (Now / 5y / 10y)</div>
               <div className="h-64 w-full">
@@ -564,6 +556,7 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
+            {/* Two small charts */}
             <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
               <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="mb-2 text-sm font-medium">Cumulative Interest (Bank vs Family)</div>
@@ -599,6 +592,7 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
+            {/* Rent vs Buy */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-1 flex items-center justify-between">
                 <div className="text-sm font-medium">Rent vs Buy — Monthly Delta</div>
@@ -618,14 +612,14 @@ export default function MortgageScenarioPro() {
               </div>
             </div>
 
+            {/* NPV / IRR */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-2 text-sm font-medium">NPV / IRR (Owner cashflows incl. equity terminal value)</div>
               <div className="grid grid-cols-2 gap-4">
-                <KPI icon={TrendingUp} label="NPV (disc rate)" value={`$${result.npv.toLocaleString()}`} hint={`@ ${active.cfg.discountRatePct}%`} />
+                <KPI icon={TrendingUp} label="NPV (disc rate)" value={`$${result.npv.toLocaleString()}`} hint={`@ ${cfg.discountRatePct}%`} />
                 <KPI icon={TrendingUp} label="IRR (annualized)" value={`${(result.irrAnnual*100).toFixed(2)}%`} hint="Based on monthly flows" />
               </div>
             </div>
-
           </section>
         </div>
       </main>

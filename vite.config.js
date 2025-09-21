@@ -3,5 +3,6 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  base: '/MortageEstimator/', // <-- repo name (case/typo must match)
+  base: '/MortageEstimator/',
+  build: { sourcemap: true } 
 })
