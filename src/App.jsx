@@ -1,14 +1,16 @@
 import React, { useMemo, useState } from "react";
-import { Download, Plus, Trash2, TrendingUp, Wallet, Settings, Info } from "lucide-react";
+import { Download, Plus, Trash2, TrendingUp, Wallet, Settings, Info, Pencil } from "lucide-react";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  XAxis, YAxis, CartesianGrid,
   Tooltip as RTooltip, Legend as RLegend,
-  LineChart, Line, ResponsiveContainer, ReferenceLine
+  LineChart, Line, ResponsiveContainer, ReferenceLine,
+  BarChart, Bar
 } from "recharts";
 
 /* =============== Helpers =============== */
 const toMonthlyRate = (annualPct) => annualPct / 100 / 12;
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+const fmt = (v) => `$${Math.round(v || 0).toLocaleString()}`;
 
 function irr(cashflows, guess = 0.05) {
   let rate = guess;
@@ -51,10 +53,10 @@ function buildSchedule({
     amount: famAmt = 0,
     rate: famRate = 4.5,
     termYears: famYears = 30,
-    mode = "amortized",               // "amortized" | "interest_only"
-    altAnnualPct = 5,                 // what family could earn elsewhere
-    altTaxPct = 30,                   // tax applied to the alt return (if NOT lending)
-    reinvestAnnualPct = 5,            // what family earns reinvesting repayments from you
+    mode = "amortized",
+    altAnnualPct = 5,
+    altTaxPct = 30,
+    reinvestAnnualPct = 5,
   } = {},
   taxPct = 1.2, taxInflationPct = 2.5,
   insuranceAnnual = 2000, insuranceInflationPct = 3,
@@ -68,38 +70,29 @@ function buildSchedule({
   const termMonths = bankTermYears * 12;
   const horizonMonths = horizonYears * 12;
 
-  // Principals
-  const principalBankFull = price - down;                  // if no family loan
-  const principalBank = Math.max(principalBankFull - famAmt, 0); // actual bank principal
+  const principalBankFull = price - down;
+  const principalBank = Math.max(principalBankFull - famAmt, 0);
 
-  // Upfront
   const pointsCost = principalBank * (pointsPct / 100);
-  const cashToClose = down + closingCosts + pointsCost;
 
-  // PMI
   const initLTV = principalBank / price;
   const pmiMonthlyBase = pmiEnabled && initLTV > 0.8 ? (principalBank * (pmiPctAnnual / 100)) / 12 : 0;
 
-  // Tax/Ins bases
   const taxMonthly0 = (taxPct / 100) * price / 12;
   const insMonthly0 = insuranceAnnual / 12;
 
-  // Family amortization
   const famTermMonths = famYears * 12;
   const famMonthly = famAmt > 0
     ? (mode === "interest_only" ? (famAmt * toMonthlyRate(famRate)) : pmt(famAmt, famRate, famTermMonths))
     : 0;
 
-  // Bank fixed payment (if fixed)
   const bankMonthlyFixed = bankType === "fixed" ? pmt(principalBank, bankRate, termMonths) : 0;
 
-  // ARM path
   const indexPath = new Array(bankTermYears)
     .fill(0)
     .map((_, i) => indexForecast[i] ?? indexForecast[indexForecast.length - 1] ?? 0);
   const armCeiling = bankRate + caps.lifetime;
 
-  // Run schedule
   const rows = [];
   let bal = principalBank;
   let famBal = famAmt;
@@ -112,12 +105,10 @@ function buildSchedule({
 
   for (let m = 1; m <= Math.min(horizonMonths, 720); m++) {
     const year = Math.ceil(m / 12);
-
-    // Drifted tax/ins
     const taxMonthly = taxMonthly0 * Math.pow(1 + taxInflationPct / 100, year - 1);
     const insMonthly = insMonthly0 * Math.pow(1 + insuranceInflationPct / 100, year - 1);
 
-    // ----- Bank payment
+    // Bank payment
     let bankPayment = 0, bankInterest = 0, bankPrincipalPaid = 0;
     if (principalBank > 0 && bal > 0 && m <= termMonths) {
       if (bankType === "fixed") {
@@ -147,23 +138,22 @@ function buildSchedule({
       }
       bankPrincipalPaid = Math.max(bankPayment - bankInterest, 0);
 
-      // Prepay (monthly + lumps)
+      // Prepay
       let prepayThisMonth = monthlyExtra;
       const lumps = lumpSums.filter(ls => ls.month === m).reduce((s, ls) => s + ls.amount, 0);
       prepayThisMonth += lumps;
-
       const principalReduction = Math.min(bankPrincipalPaid + prepayThisMonth, bal);
       bal -= principalReduction;
     }
 
-    // PMI toggle
+    // PMI
     if (pmiActive) {
       const ltv = bal / price;
       if (ltv <= dropLTV || bal <= 0) pmiActive = false;
     }
     const pmiMonthly = pmiActive ? pmiMonthlyBase : 0;
 
-    // ----- Family payment
+    // Family payment
     let famPayment = 0, famInterest = 0, famPrincipalPaid = 0;
     if (famBal > 0) {
       if (mode === "interest_only") {
@@ -178,7 +168,7 @@ function buildSchedule({
       cumFamilyInterest += famInterest;
     }
 
-    // --- Family reinvest earnings on received payments (assumed untaxed per your note)
+    // Reinvest earnings (for household math)
     const rReinvest = toMonthlyRate(reinvestAnnualPct);
     const reinvestEarnings = reinvestBal * rReinvest;
     reinvestBal = reinvestBal * (1 + rReinvest) + famPayment;
@@ -189,17 +179,12 @@ function buildSchedule({
     const carryingFixed = hoaMonthly + utilitiesMonthly + (price * (maintPctAnnual / 100) / 12);
     const totalMonthly = (bankPayment || 0) + famPayment + pmiMonthly + escrowItems + carryingFixed;
 
-    // Household delta:
-    //  + alt return on remaining family balance (AFTER TAX)
-    //  - interest family earns from you
-    //  - reinvest earnings they make on repayments (untaxed per assumption)
+    // Household delta (includes reinvest & taxed alternative)
     const altReturnGross = famBal * toMonthlyRate(altAnnualPct);
     const altReturnAfterTax = altReturnGross * (1 - altTaxPct / 100);
     const householdDelta = altReturnAfterTax - famInterest - reinvestEarnings;
-
     const totalMonthlyHousehold = totalMonthly + householdDelta;
 
-    // Equity approx
     const equity = price - bal - famBal;
 
     rows.push({
@@ -226,34 +211,17 @@ function buildSchedule({
       totalMonthlyHousehold: +totalMonthlyHousehold.toFixed(2),
       householdDelta: +householdDelta.toFixed(2),
 
-      // handy for charts
       equity: +equity.toFixed(2),
       totalInterestThisMonth: +(bankInterest + famInterest).toFixed(2),
       totalPrincipalThisMonth: +(bankPrincipalPaid + famPrincipalPaid).toFixed(2),
     });
   }
 
-  // Investment stream (vs full-bank-only baseline)
-  const bankFullMonthly = pmt(price - down, bankRate, termMonths); // baseline ignores family loan
+  const bankFullMonthly = pmt(price - down, bankRate, termMonths);
   const actualDebtMonthly = rows.map(r => (r.bankPayment || 0) + r.famPayment);
   const monthlySavings = rows.map((_, i) => Math.max(bankFullMonthly - actualDebtMonthly[i], 0));
 
-  const investTracks = [
-    { key: "spx_est", label: "S&P Estimate", annualPct: 6.5 },
-    { key: "spx_hist", label: "S&P Historical", annualPct: 10.0 },
-    { key: "cd6", label: "CD/T-bill", annualPct: 5.5 },
-  ];
-  const investResults = investTracks.map(track => {
-    let bal = 0;
-    const r = toMonthlyRate(track.annualPct);
-    for (let i = 0; i < monthlySavings.length; i++) bal = bal * (1 + r) + monthlySavings[i];
-    const contributed = monthlySavings.reduce((a, b) => a + b, 0);
-    const profit = bal - contributed;
-    return { key: track.key, label: track.label, final: +bal.toFixed(2), profit: +profit.toFixed(2) };
-  });
-
-  // NPV/IRR: owner + household
-  const initialOut = -(down + closingCosts + pointsCost);
+  const initialOut = -(down + closingCosts + principalBank * (pointsPct / 100));
   const cash_owner = [initialOut, ...rows.map(r => -r.totalMonthly)];
   cash_owner[cash_owner.length - 1] += rows[rows.length - 1]?.equity ?? 0;
 
@@ -265,22 +233,23 @@ function buildSchedule({
 
   return {
     rows,
-    investResults,
     irrAnnual: +irrAnnual.toFixed(4),
     irrAnnualHousehold: +irrAnnualHH.toFixed(4),
     npv: +npv(discountRatePct, cash_owner).toFixed(2),
     npvHousehold: +npv(discountRatePct, cash_house).toFixed(2),
     monthlySavings: monthlySavings.map(v => +v.toFixed(2)),
-    cumFamilyInterest: +cumFamilyInterest.toFixed(2),
-    cumReinvestEarnings: +cumReinvestEarnings.toFixed(2),
   };
 }
 
-/* =============== UI =============== */
+function buildScenarioVariants(cfg) {
+  const withFamily = buildSchedule({ ...cfg, down: cfg.downWithFamily });
+  const bankOnly   = buildSchedule({ ...cfg, family: { ...cfg.family, amount: 0 }, down: cfg.downBankOnly });
+  return { withFamily, bankOnly };
+}
+
+/* =============== UI bits =============== */
 const preset = {
   price: 1_000_000,
-
-  // Per-variant downs
   downBankOnly: 150_000,
   downWithFamily: 200_000,
 
@@ -289,7 +258,6 @@ const preset = {
   ioMonths: 0,
   pointsPct: 0.5, closingCosts: 12_000,
 
-  // Family finance + tax on alt return
   family: { amount: 300_000, rate: 4.5, termYears: 30, mode: "amortized", altAnnualPct: 5, altTaxPct: 30, reinvestAnnualPct: 5 },
 
   taxPct: 1.2, taxInflationPct: 2.5,
@@ -297,13 +265,22 @@ const preset = {
   hoaMonthly: 90, maintPctAnnual: 1.0, utilitiesMonthly: 350,
   escrow: true,
   pmi: { enabled: true, dropLTV: 0.78, pmiPctAnnual: 0.6 },
-  prepay: { monthlyExtra: 0, lumpSums: [] },
 
   horizonYears: 30,
   discountRatePct: 5.0,
 };
 
-// Controls
+const BAR_COLORS = {
+  Bank: "#6366f1",
+  Family: "#22c55e",
+  PMI: "#f59e0b",
+  Tax: "#0ea5e9",
+  Insurance: "#94a3b8",
+  HOA: "#a78bfa",
+  Maintenance: "#ef4444",
+  Utilities: "#14b8a6",
+};
+
 function NumberInput({ label, value, onChange, step = 1, min, max, suffix }) {
   return (
     <label className="flex flex-col gap-1 text-sm">
@@ -328,6 +305,7 @@ function Toggle({ label, checked, onChange }) {
     <label className="flex items-center justify-between gap-3 text-sm">
       <span className="text-slate-600">{label}</span>
       <button
+        type="button"
         onClick={() => onChange(!checked)}
         className={`relative h-6 w-11 rounded-full transition ${checked ? "bg-indigo-600" : "bg-slate-300"}`}
       >
@@ -346,55 +324,38 @@ function KPI({ icon: Icon, label, value, hint, emphasis = false }) {
   );
 }
 
-// Helper: compute config for a scenario's chosen variant
 function configForVariant(cfg, variant) {
   if (variant === "bank") {
     return { ...cfg, down: cfg.downBankOnly, family: { ...cfg.family, amount: 0 } };
   }
-  // 'family'
   return { ...cfg, down: cfg.downWithFamily };
 }
 
 /* =============== App =============== */
 export default function MortgageScenarioPro() {
   const [scenarios, setScenarios] = useState([
-    { id: 1, name: "Baseline", cfg: preset, variant: "family" }, // 'bank' | 'family'
+    { id: 1, name: "Baseline", cfg: preset, variant: "family" },
   ]);
   const [activeId, setActiveId] = useState(1);
 
-  // Big chart mode: 'household' vs 'interest'
   const [chartMode, setChartMode] = useState("household");
+  const [interestHover, setInterestHover] = useState(null);
+  const [bigHover, setBigHover] = useState(null);
+  const [costHover, setCostHover] = useState(null);
+
+  const [includeReinvest, setIncludeReinvest] = useState(false);
+  // When ON: Family Interest is net of bank after-tax interest
+  const [showNetVsBank, setShowNetVsBank] = useState(false);
 
   const active = scenarios.find(s => s.id === activeId) ?? scenarios[0];
 
-  // Active scenario result (for small charts/KPIs), honors this scenario's own variant
   const activeCfg = configForVariant(active.cfg, active.variant);
   const result = useMemo(() => buildSchedule(activeCfg), [activeCfg]);
 
-  // KPIs
   const monthlyNow = result.rows[0]?.totalMonthly ?? 0;
   const cumDebtInterest = result.rows.reduce((a, r) => a + r.bankInterest + r.famInterest, 0);
   const equity10 = result.rows[119]?.equity ?? 0;
-  const cumFamilyInterest = result.cumFamilyInterest ?? 0;
 
-  // Single-bar Monthly Mix (current month only)
-  const nowMix = [{
-    name: "Now",
-    Bank: result.rows[0]?.bankPayment ?? 0,
-    Family: result.rows[0]?.famPayment ?? 0,
-    PMI: result.rows[0]?.pmi ?? 0,
-    Escrow: result.rows[0]?.escrow ?? 0,
-    Carry: (result.rows[0]?.hoa ?? 0) + (result.rows[0]?.maint ?? 0) + (result.rows[0]?.util ?? 0),
-  }];
-
-  // Amortization flow (active scenario, chosen variant)
-  const principalVsInterest = result.rows.map(r => ({
-    name: `M${r.m}`,
-    Principal: +(r.bankPrincipal + r.famPrincipal).toFixed(2),
-    Interest: +(r.bankInterest + r.famInterest).toFixed(2),
-  }));
-
-  // === Big chart: one line per scenario, respecting each scenario's own variant ===
   const compareLines = useMemo(() => {
     const palette = ["#6366f1","#22c55e","#ef4444","#0ea5e9","#f59e0b","#14b8a6","#a855f7","#e11d48"];
     return scenarios.map((s, idx) => {
@@ -423,7 +384,116 @@ export default function MortgageScenarioPro() {
     });
   }, [compareLines]);
 
-  // Scenario ops
+  const scenarioPairs = useMemo(() => {
+    return scenarios.map(s => ({
+      id: s.id,
+      name: s.name,
+      cfg: s.cfg,
+      both: buildScenarioVariants(s.cfg)
+    }));
+  }, [scenarios]);
+
+  /* === Interest Earned (interest-only), Family vs Bank; Family can be net of bank === */
+  const interestEarnedData = useMemo(() => {
+    const sp = (scenarioPairs.find(p => p.id === active.id) ?? scenarioPairs[0]);
+    if (!sp) return [];
+
+    const { withFamily } = sp.both;
+
+    // inputs
+    const fam = sp.cfg.family ?? {};
+    const FAM_AMT   = +((fam.amount ?? 0) || 0);        // base for bank alt path
+    const rFam      = (fam.rate ?? 0) / 100 / 12;       // family loan monthly rate
+    const rAlt      = (fam.altAnnualPct ?? 0) / 100 / 12;
+    const altTax    = (fam.altTaxPct ?? 0) / 100;       // tax on alt interest
+    const rReinvest = (fam.reinvestAnnualPct ?? 0) / 100 / 12;
+
+    // running state — INTEREST ONLY (no principal appears in the chart)
+    let lendRemaining = FAM_AMT;        // for family interest calc (declining balance)
+    let famInterestCum = 0;             // cumulative interest family earns from lending
+    let reinvBal = 0;                   // pot of repayments (for reinvest interest)
+    let reinvInterestCum = 0;           // cumulative interest on reinvest pot
+
+    // bank alt path — INTEREST ONLY after tax
+    let bankInterestCum = 0;            // cumulative after-tax alt interest
+    let bankBase = FAM_AMT;             // base just to compute next month's interest
+
+    const yearly = [];
+    const maxM = Math.min(withFamily.rows.length, 360);
+
+    for (let m = 1; m <= maxM; m++) {
+      const row = withFamily.rows[m - 1] || { famPayment: 0, famPrincipal: 0 };
+
+      // ---- bank path (after-tax interest only)
+      const altInterest = bankBase * rAlt;
+      const altAfterTax = altInterest * (1 - altTax);
+      bankInterestCum += altAfterTax;       // accumulate interest only
+      bankBase += altAfterTax;              // grow base for next interest calc
+
+      // ---- family path (interest only)
+      const famInterest = lendRemaining * rFam;
+      famInterestCum += famInterest;
+
+      // optional reinvest interest (pot grows by interest + borrower's payment)
+      const reinvInterest = reinvBal * rReinvest;
+      reinvInterestCum += reinvInterest;
+      reinvBal = reinvBal + reinvInterest + (row.famPayment || 0);
+
+      // update remaining principal for next month
+      lendRemaining = Math.max(lendRemaining - (row.famPrincipal || 0), 0);
+
+      if (m % 12 === 0) {
+        const yr = m / 12;
+        const famRaw = includeReinvest
+          ? (famInterestCum + reinvInterestCum)
+          : famInterestCum;
+
+        yearly.push({
+          name: `Y${yr}`,
+          "Family Interest": +(showNetVsBank ? (famRaw - bankInterestCum) : famRaw).toFixed(2),
+          "Bank Interest":   +bankInterestCum.toFixed(2),
+        });
+      }
+    }
+    return yearly;
+  }, [scenarioPairs, active.id, includeReinvest, showNetVsBank]);
+
+  /* === Monthly cost breakdown bars === */
+  const costBars = useMemo(() => {
+    return scenarios.map((s) => {
+      const cfg = configForVariant(s.cfg, s.variant);
+      const res = buildSchedule(cfg);
+      const r0 = res.rows[0] || {};
+      return {
+        name: s.name,
+        Bank: r0.bankPayment ?? 0,
+        Family: r0.famPayment ?? 0,
+        PMI: r0.pmi ?? 0,
+        Tax: r0.tax ?? 0,
+        Insurance: r0.ins ?? 0,
+        HOA: r0.hoa ?? 0,
+        Maintenance: r0.maint ?? 0,
+        Utilities: r0.util ?? 0,
+      };
+    });
+  }, [scenarios]);
+
+  function exportCSV() {
+    const header = ["Month","BankPayment","BankInterest","BankPrincipal","BankBalance","FamilyPayment","FamilyInterest","FamilyPrincipal","FamilyBalance","PMI","Tax","Insurance","HOA","Maintenance","Utilities","Escrow","TotalMonthly","HHMonthly","Equity"];
+    const rows = result.rows.map(r => [
+      r.m,r.bankPayment,r.bankInterest,r.bankPrincipal,r.bankBalance,
+      r.famPayment,r.famInterest,r.famPrincipal,r.famBalance,
+      r.pmi,r.tax,r.ins,r.hoa,r.maint,r.util,r.escrow,
+      r.totalMonthly,r.totalMonthlyHousehold,r.equity
+    ]);
+    const csv = [header, ...rows].map(r => r.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `${(active.name || "Scenario").replace(/\s+/g,'_')}_schedule.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function addScenarioFrom(base) {
     const id = Math.max(...scenarios.map(s => s.id)) + 1;
     setScenarios([...scenarios, { id, name: `Scenario ${id}`, cfg: JSON.parse(JSON.stringify(base.cfg)), variant: base.variant }]);
@@ -446,28 +516,11 @@ export default function MortgageScenarioPro() {
   function updateActivePMI(patch) {
     updateActiveCfg({ pmi: { ...active.cfg.pmi, ...patch } });
   }
-  function updateActivePrepay(patch) {
-    updateActiveCfg({ prepay: { ...active.cfg.prepay, ...patch } });
-  }
   function setScenarioVariant(id, variant) {
     setScenarios(scenarios.map(s => s.id === id ? { ...s, variant } : s));
   }
-
-  // CSV for active scenario (chosen variant)
-  function exportCSV() {
-    const header = ["Month","BankPayment","BankInterest","BankPrincipal","BankBalance","FamilyPayment","FamilyInterest","FamilyPrincipal","FamilyBalance","PMI","Tax","Insurance","HOA","Maintenance","Utilities","Escrow","TotalMonthly","HHMonthly","Equity"];
-    const rows = result.rows.map(r => [
-      r.m,r.bankPayment,r.bankInterest,r.bankPrincipal,r.bankBalance,
-      r.famPayment,r.famInterest,r.famPrincipal,r.famBalance,
-      r.pmi,r.tax,r.ins,r.hoa,r.maint,r.util,r.escrow,
-      r.totalMonthly,r.totalMonthlyHousehold,r.equity
-    ]);
-    const csv = [header, ...rows].map(r => r.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `${(active.name || "Scenario").replace(/\s+/g,'_')}_schedule.csv`; a.click();
-    URL.revokeObjectURL(url);
+  function renameScenario(id, name) {
+    setScenarios(scenarios.map(s => s.id === id ? { ...s, name } : s));
   }
 
   return (
@@ -484,57 +537,50 @@ export default function MortgageScenarioPro() {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-6">
-        {/* Scenarios: select active + per-scenario variant buttons */}
+        {/* Scenarios row (stronger active chip + inline rename) */}
         <div className="mb-3 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             {scenarios.map(s => (
-              <div key={s.id} className={`flex items-center gap-2 rounded-full border px-2 py-1 ${activeId===s.id ? "border-indigo-300 bg-indigo-50" : "border-slate-200 bg-white"}`}>
-                <button onClick={() => setActiveId(s.id)} className="text-sm font-medium">{s.name}</button>
+              <div
+                key={s.id}
+                className={`flex items-center gap-2 rounded-full border px-2 py-1 cursor-pointer ${
+                  activeId===s.id ? "border-indigo-500 bg-indigo-200" : "border-slate-200 bg-white"
+                }`}
+                onClick={() => setActiveId(s.id)}
+              >
+                <input
+                  value={s.name}
+                  onChange={(e)=>renameScenario(s.id, e.target.value)}
+                  onClick={(e)=>e.stopPropagation()}
+                  className="w-28 truncate rounded-md border border-transparent px-2 py-0.5 text-sm focus:border-slate-300 focus:outline-none bg-transparent"
+                  title="Click to edit name"
+                />
+                <Pencil size={14} className="text-slate-500" />
                 <div className="flex rounded-full bg-slate-100 p-0.5">
                   <button
-                    onClick={()=>setScenarioVariant(s.id,"bank")}
+                    onClick={(e)=>{e.stopPropagation(); setScenarioVariant(s.id,"bank");}}
                     className={`px-2 py-0.5 text-xs rounded-full ${s.variant==="bank"?"bg-slate-900 text-white":"text-slate-700"}`}
                     title="Bank only"
                   >Bank</button>
                   <button
-                    onClick={()=>setScenarioVariant(s.id,"family")}
+                    onClick={(e)=>{e.stopPropagation(); setScenarioVariant(s.id,"family");}}
                     className={`px-2 py-0.5 text-xs rounded-full ${s.variant==="family"?"bg-slate-900 text-white":"text-slate-700"}`}
                     title="With family"
                   >Family</button>
                 </div>
                 {scenarios.length>1 && (
-                  <button onClick={() => removeScenario(s.id)} className="text-xs text-rose-600 hover:underline"><Trash2 size={14}/></button>
+                  <button onClick={(e)=>{e.stopPropagation(); removeScenario(s.id);}} className="text-xs text-rose-600 hover:underline"><Trash2 size={14}/></button>
                 )}
               </div>
             ))}
           </div>
         </div>
 
-        {/* Big chart mode toggle */}
-        <div className="mb-4 flex items-center gap-2">
-          <span className="text-sm text-slate-600">Big chart:</span>
-          <button onClick={()=>setChartMode("household")} className={`rounded-full px-3 py-1 text-sm ${chartMode==="household"?"bg-slate-900 text-white":"bg-white border border-slate-200"}`}>Cumulative household cost</button>
-          <button onClick={()=>setChartMode("interest")} className={`rounded-full px-3 py-1 text-sm ${chartMode==="interest"?"bg-slate-900 text-white":"bg-white border border-slate-200"}`}>Cumulative interest only</button>
-        </div>
-
-        {/* OVERBOX — Cumulative Interest paid to Family (active scenario, chosen variant) */}
-        <div className="mb-4">
-          <div className="rounded-2xl border border-indigo-300 bg-indigo-50 p-4 shadow-sm">
-            <div className="flex items-center gap-2 text-indigo-700 text-xs"><TrendingUp size={16}/> Cumulative interest paid to family</div>
-            <div className="mt-1 text-3xl font-semibold tabular-nums leading-tight break-all text-indigo-900">
-              ${Math.round(cumFamilyInterest).toLocaleString()}
-            </div>
-            <div className="mt-1 text-xs text-indigo-700">Based on family loan amount, rate, mode, term, and your current inputs.</div>
-          </div>
-        </div>
-
-        {/* KPI header (active scenario, chosen variant) */}
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
-          <KPI icon={TrendingUp} label="Monthly payment (now)" value={`$${monthlyNow.toLocaleString()}`} />
-          <KPI icon={TrendingUp} label="Total interest (all debt)" value={`$${Math.round(cumDebtInterest).toLocaleString()}`} />
-          <KPI icon={TrendingUp} label="Equity @ 10 years" value={`$${Math.round(equity10).toLocaleString()}`} />
-          <KPI icon={TrendingUp} label="Your net cost (today’s $)" value={`$${result.npv.toLocaleString()}`} hint={`Your IRR ${(result.irrAnnual*100).toFixed(2)}%`} />
-          <KPI icon={TrendingUp} label="All-in family net cost (today’s $)" value={`$${result.npvHousehold.toLocaleString()}`} hint={`Household IRR ${(result.irrAnnualHousehold*100).toFixed(2)}%`} />
+        {/* KPI header */}
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+          <KPI icon={TrendingUp} label="Monthly payment (now)" value={fmt(monthlyNow)} />
+          <KPI icon={TrendingUp} label="Total interest (all debt)" value={fmt(cumDebtInterest)} />
+          <KPI icon={TrendingUp} label="Equity @ 10 years" value={fmt(equity10)} />
         </div>
 
         {/* Layout: Inputs (left) / Charts (right) */}
@@ -542,7 +588,7 @@ export default function MortgageScenarioPro() {
           {/* Inputs */}
           <section className="lg:col-span-1 space-y-5">
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Settings size={16}/> Home & Costs</div>
+              <div className="mb-3 flex items-center gap-2 text-base font-semibold"><Settings size={16}/> Home & Costs</div>
               <div className="grid grid-cols-2 gap-3">
                 <NumberInput label="Home price" value={active.cfg.price} onChange={(v)=>updateActiveCfg({price:v})} step={1000}/>
                 <NumberInput label="Closing costs" value={active.cfg.closingCosts} onChange={(v)=>updateActiveCfg({closingCosts:v})} step={500}/>
@@ -561,7 +607,7 @@ export default function MortgageScenarioPro() {
             </div>
 
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> Bank Loan</div>
+              <div className="mb-3 flex items-center gap-2 text-base font-semibold"><Info size={16}/> Bank Loan</div>
               <div className="grid grid-cols-2 gap-3">
                 <label className="flex flex-col gap-1 text-sm">
                   <span className="text-slate-600">Type</span>
@@ -586,7 +632,7 @@ export default function MortgageScenarioPro() {
             </div>
 
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> Family Loan</div>
+              <div className="mb-3 flex items-center gap-2 text-base font-semibold"><Info size={16}/> Family Loan</div>
               <div className="grid grid-cols-2 gap-3">
                 <NumberInput label="Amount" value={active.cfg.family.amount} onChange={(v)=>updateActiveFamily({amount:v})} step={1000}/>
                 <label className="flex flex-col gap-1 text-sm">
@@ -603,36 +649,42 @@ export default function MortgageScenarioPro() {
                 <NumberInput label="Reinvest return (%)" value={active.cfg.family.reinvestAnnualPct} onChange={(v)=>updateActiveFamily({reinvestAnnualPct:v})} step={0.25}/>
               </div>
               <div className="mt-2 text-xs text-slate-500">
-                “Alt return” = what family earns if they don’t lend you the money (taxed). “Reinvest return” = what they earn by investing your repayments (treated as not taxed).
+                Toggle on “Interest Earned” lets you include reinvest of repayments at Reinvest return (%).
               </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Info size={16}/> PMI & Prepay</div>
-              <div className="grid grid-cols-2 gap-3">
-                <Toggle label="PMI enabled" checked={active.cfg.pmi.enabled} onChange={(v)=>updateActivePMI({enabled:v})}/>
-                <NumberInput label="PMI drop LTV" value={active.cfg.pmi.dropLTV} onChange={(v)=>updateActivePMI({dropLTV:v})} step={0.01}/>
-                <NumberInput label="PMI % (annual)" value={active.cfg.pmi.pmiPctAnnual} onChange={(v)=>updateActivePMI({pmiPctAnnual:v})} step={0.05}/>
-                <NumberInput label="Monthly extra" value={active.cfg.prepay.monthlyExtra} onChange={(v)=>updateActivePrepay({monthlyExtra:v})} step={50}/>
-              </div>
-              <div className="mt-2 text-xs text-slate-500">Add lump-sum prepayments by editing code or wire a small sub-form.</div>
             </div>
           </section>
 
           {/* Charts */}
           <section className="lg:col-span-2 space-y-6">
-            {/* BIG: Compare scenarios (one line per scenario, per-scenario variant) */}
+            {/* Big-chart toggle */}
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-600">Big chart:</span>
+              <button onClick={()=>setChartMode("household")} className={`rounded-full px-3 py-1 text-sm ${chartMode==="household"?"bg-slate-900 text-white":"bg-white border border-slate-200"}`}>Cumulative household cost</button>
+              <button onClick={()=>setChartMode("interest")} className={`rounded-full px-3 py-1 text-sm ${chartMode==="interest"?"bg-slate-900 text-white":"bg-white border border-slate-200"}`}>Cumulative interest only</button>
+            </div>
+
+            {/* BIG: Compare scenarios */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-2 text-sm font-medium">
+              <div className="mb-2 text-base font-semibold">
                 {chartMode === "household" ? "Cumulative household cost — 30 years" : "Cumulative interest only — 30 years"} (each scenario uses its own Bank/Family selection)
               </div>
               <div className="h-72 w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={mergedCompare}>
+                  <LineChart
+                    data={mergedCompare}
+                    onMouseMove={(e)=>{
+                      if (e && e.activePayload && e.activePayload.length) {
+                        const obj = { label: e.activeLabel };
+                        e.activePayload.forEach(pp => { obj[pp.dataKey] = pp.value; });
+                        setBigHover(obj);
+                      } else setBigHover(null);
+                    }}
+                    onMouseLeave={()=>setBigHover(null)}
+                  >
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="name" />
                     <YAxis tickFormatter={(v)=>`$${(v/1000).toFixed(0)}k`} />
-                    <RTooltip formatter={(v)=>`$${Math.round(v).toLocaleString()}`} />
+                    <RTooltip content={null} />
                     <RLegend />
                     {compareLines.map(line => (
                       <Line key={line.name} type="monotone" dataKey={line.name} stroke={line.color} strokeWidth={2} dot={false} />
@@ -640,80 +692,143 @@ export default function MortgageScenarioPro() {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-            </div>
-
-            {/* Smaller charts */}
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-              {/* Single-bar Monthly Mix (Now) */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="mb-2 text-sm font-medium">
-                  Monthly payment mix — now ({active.variant==="bank"?"Bank only":"With family"})
-                </div>
-                <div className="h-64 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={nowMix} stackOffset="expand">
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="name" />
-                      <YAxis tickFormatter={(v)=>`${Math.round(v*100)}%`} />
-                      <RTooltip formatter={(v)=>`$${Math.round(v).toLocaleString()}`} />
-                      <RLegend />
-                      <Bar dataKey="Bank" stackId="a" fill="#6366f1" />
-                      <Bar dataKey="Family" stackId="a" fill="#22c55e" />
-                      <Bar dataKey="PMI" stackId="a" fill="#f59e0b" />
-                      <Bar dataKey="Escrow" stackId="a" fill="#0ea5e9" />
-                      <Bar dataKey="Carry" stackId="a" fill="#94a3b8" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Principal vs Interest over time */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="mb-2 text-sm font-medium">
-                  Amortization flow — principal vs interest ({active.variant==="bank"?"Bank only":"With family"})
-                </div>
-                <div className="h-64 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={principalVsInterest}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="name" hide />
-                      <YAxis tickFormatter={(v)=>`$${(v/1000).toFixed(0)}k`} />
-                      <RTooltip formatter={(v)=>`$${Math.round(v).toLocaleString()}`} />
-                      <RLegend />
-                      <Line type="monotone" dataKey="Principal" stroke="#22c55e" strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey="Interest" stroke="#ef4444" strokeWidth={2} dot={false} />
-                      <ReferenceLine y={0} stroke="#64748b" />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
+              <div className="mt-2 text-xs rounded-xl border border-slate-200 bg-slate-50 p-2">
+                {bigHover ? (
+                  <div className="flex flex-wrap gap-4">
+                    <span className="font-medium">{bigHover.label}</span>
+                    {Object.keys(bigHover).filter(k=>k!=="label").map(k=>(
+                      <span key={k}>{k}: <strong>{fmt(bigHover[k])}</strong></span>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-slate-500">Hover the chart to see values below.</span>
+                )}
               </div>
             </div>
 
-            {/* Net cost & return (active) */}
+            {/* Interest Earned: Family (raw or net) vs Bank */}
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-2 text-sm font-medium">Net cost (today’s $) & return — {active.variant==="bank"?"Bank only":"With family"} (active scenario)</div>
-              <div className="grid grid-cols-2 gap-4">
-                <KPI
-                  icon={TrendingUp}
-                  label="Your net cost (today’s $)"
-                  value={`$${result.npv.toLocaleString()}`}
-                  hint={`Your IRR ${(result.irrAnnual*100).toFixed(2)}%`}
-                />
-                <KPI
-                  icon={TrendingUp}
-                  label="All-in family net cost (today’s $)"
-                  value={`$${result.npvHousehold.toLocaleString()}`}
-                  hint={`Household IRR ${(result.irrAnnualHousehold*100).toFixed(2)}%`}
-                />
+              <div className="mb-2 flex items-center gap-3 text-base font-semibold">
+                <span>Interest Earned — {active.name} - 30yr</span>
+                <label className="flex items-center gap-2 text-xs font-normal text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={includeReinvest}
+                    onChange={(e)=>setIncludeReinvest(e.target.checked)}
+                  />
+                  Include reinvest on family line
+                </label>
+                <label className="flex items-center gap-2 text-xs font-normal text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={showNetVsBank}
+                    onChange={(e)=>setShowNetVsBank(e.target.checked)}
+                  />
+                  Show net vs bank
+                </label>
+              </div>
+              <div className="h-64 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart
+                    data={interestEarnedData}
+                    onMouseMove={(e) => {
+                      if (e && e.activePayload && e.activePayload.length) {
+                        const p = e.activePayload;
+                        const obj = { label: e.activeLabel };
+                        p.forEach(pp => { obj[pp.dataKey] = pp.value; });
+                        setInterestHover(obj);
+                      } else setInterestHover(null);
+                    }}
+                    onMouseLeave={() => setInterestHover(null)}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="name" />
+                    <YAxis tickFormatter={fmt} />
+                    <RTooltip content={null} />
+                    <RLegend />
+                    <Line type="monotone" dataKey="Family Interest" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="Bank Interest" strokeWidth={2} dot={false} strokeDasharray="6 4" />
+                    <ReferenceLine y={0} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="mt-2 text-xs rounded-xl border border-slate-200 bg-slate-50 p-2">
+                {interestHover ? (
+                  <div className="flex flex-wrap gap-4">
+                    <span className="font-medium">{interestHover.label}</span>
+                    <span>
+                      Family Interest{showNetVsBank ? " (net of bank)" : ""}:{" "}
+                      <strong>{fmt(interestHover["Family Interest"])}</strong>
+                    </span>
+                    <span>Bank Interest: <strong>{fmt(interestHover["Bank Interest"])}</strong></span>
+                  </div>
+                ) : (
+                  <span className="text-slate-500">Hover the chart to see values below.</span>
+                )}
               </div>
             </div>
+
+            {/* Monthly Cost Breakdown (bars across scenarios) */}
+            <MonthlyCostBars costBars={costBars} costHover={costHover} setCostHover={setCostHover} />
           </section>
         </div>
       </main>
 
       <footer className="mx-auto max-w-7xl px-4 py-8 text-center text-xs text-slate-500">
-        Each scenario uses its own Bank/Family selection. Big chart can show cumulative household cost or cumulative interest only. Family “alt return” is taxed; reinvest on repayments is not.
+        Big chart shows a hover panel below. “Interest Earned” is interest-only; toggle to show family interest net of bank (after tax), and to include reinvest on the family line.
       </footer>
+    </div>
+  );
+}
+
+/* ---- Extracted component ---- */
+function MonthlyCostBars({ costBars, costHover, setCostHover }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="mb-2 text-base font-semibold">Monthly Cost Breakdown — current month (by scenario)</div>
+      <div className="h-72 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            data={costBars}
+            stackOffset="expand"
+            onMouseMove={(e) => {
+              if (e && e.activePayload && e.activePayload.length) {
+                const p = e.activePayload;
+                const obj = { label: p[0]?.payload?.name || "" };
+                p.forEach(pp => { obj[pp.dataKey] = pp.value; });
+                setCostHover(obj);
+              } else setCostHover(null);
+            }}
+            onMouseLeave={() => setCostHover(null)}
+          >
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="name" />
+            <YAxis tickFormatter={(v)=>`${Math.round(v*100).toLocaleString()}%`} />
+            <RTooltip content={null} />
+            <RLegend />
+            <Bar dataKey="Bank"        stackId="a" fill={BAR_COLORS.Bank} />
+            <Bar dataKey="Family"      stackId="a" fill={BAR_COLORS.Family} />
+            <Bar dataKey="PMI"         stackId="a" fill={BAR_COLORS.PMI} />
+            <Bar dataKey="Tax"         stackId="a" fill={BAR_COLORS.Tax} />
+            <Bar dataKey="Insurance"   stackId="a" fill={BAR_COLORS.Insurance} />
+            <Bar dataKey="HOA"         stackId="a" fill={BAR_COLORS.HOA} />
+            <Bar dataKey="Maintenance" stackId="a" fill={BAR_COLORS.Maintenance} />
+            <Bar dataKey="Utilities"   stackId="a" fill={BAR_COLORS.Utilities} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="mt-2 text-xs rounded-xl border border-slate-200 bg-slate-50 p-2">
+        {costHover ? (
+          <div className="flex flex-wrap gap-4">
+            <span className="font-medium">{costHover.label}</span>
+            {["Bank","Family","PMI","Tax","Insurance","HOA","Maintenance","Utilities"].map(k => (
+              <span key={k}>{k}: <strong>{fmt(costHover[k])}</strong></span>
+            ))}
+          </div>
+        ) : (
+          <span className="text-slate-500">Hover a bar to see the dollar amounts below.</span>
+        )}
+      </div>
     </div>
   );
 }
